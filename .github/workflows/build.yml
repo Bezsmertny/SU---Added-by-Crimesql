@@ -1,0 +1,61 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package portable application
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package, release -Force | Out-Null
+          Copy-Item build/Release/NedohackersLite.exe package/
+          Copy-Item README.md package/
+          Copy-Item -Recurse docs package/
+          Compress-Archive -Path package/* -DestinationPath release/NEDOHACKERS-lite-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NEDOHACKERS-lite-Windows-x64
+          path: release/NEDOHACKERS-lite-Windows-x64.zip
+          if-no-files-found: error
+  core-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, core-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: NEDOHACKERS-lite-Windows-x64
+          path: release
+      - name: Publish downloadable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          release/NEDOHACKERS-lite-Windows-x64.zip
+          --verify-tag
+          --title "NEDOHACKERS lite $RELEASE_TAG"
+          --notes-file docs/release-notes.md
