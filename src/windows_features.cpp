@@ -211,6 +211,90 @@ std::wstring binding_name(Binding b) {
     else out += static_cast<wchar_t>(b.key);
     return out;
 }
+std::wstring startup_audit() {
+    std::wstring report=L"CrimeSQL dev system recovery — аудит автозагрузки\r\n"
+        L"Только Run и RunOnce в HKCU/HKLM, включая 32-битное представление HKLM.\r\n"
+        L"Это не полный анализ служб, задач планировщика и других способов запуска.\r\n"
+        L"Записи не удаляются. Команда в автозагрузке сама по себе не доказывает заражение.\r\n"
+        L"Отчёт может содержать личные пути и аргументы команд: проверьте его перед отправкой.\r\n\r\n";
+    for(int root_index=0;root_index<3;++root_index) for(const wchar_t* suffix:{L"Run",L"RunOnce"}) {
+        const auto path=L"Software\\Microsoft\\Windows\\CurrentVersion\\"+std::wstring(suffix);
+        const auto label=std::wstring(root_index==0?L"HKCU":root_index==1?L"HKLM (64/native)":L"HKLM (32-bit)")+L"\\"+path;
+        report+=L"["+label+L"]\r\n";
+        HKEY key=nullptr;
+        const auto code=RegOpenKeyExW(root_index==0?HKEY_CURRENT_USER:HKEY_LOCAL_MACHINE,path.c_str(),0,
+            KEY_QUERY_VALUE|(root_index==2?KEY_WOW64_32KEY:0),&key);
+        if(code!=ERROR_SUCCESS) { report+=code==ERROR_FILE_NOT_FOUND?L"Ключ отсутствует.\r\n\r\n":L"Недоступно: "+error_text(code)+L"\r\n\r\n"; continue; }
+        bool any=false;
+        std::vector<wchar_t> name(16384),data(32768);
+        for(DWORD index=0;index<256;++index) {
+            DWORD name_size=static_cast<DWORD>(name.size()),data_size=static_cast<DWORD>(data.size()*sizeof(wchar_t)),type=0;
+            const auto status=RegEnumValueW(key,index,name.data(),&name_size,nullptr,&type,reinterpret_cast<BYTE*>(data.data()),&data_size);
+            if(status==ERROR_NO_MORE_ITEMS) break;
+            if(status!=ERROR_SUCCESS) { report+=L"Запись недоступна: "+error_text(status)+L"\r\n"; continue; }
+            any=true;
+            report+=std::wstring(name.data(),name_size)+L" = ";
+            if((type==REG_SZ||type==REG_EXPAND_SZ)&&data_size%sizeof(wchar_t)==0) {
+                const auto count=data_size/sizeof(wchar_t);
+                const auto end=std::find(data.begin(),data.begin()+count,L'\0');
+                report+=std::wstring(data.begin(),end);
+            } else report+=L"<нетекстовое значение>";
+            report+=L"\r\n";
+            if(index==255) report+=L"Достигнут лимит 256 записей для ключа.\r\n";
+        }
+        RegCloseKey(key);
+        if(!any) report+=L"Нет записей.\r\n";
+        report+=L"\r\n";
+    }
+    return report;
+}
+Result launch_recovery_action(HWND owner,RecoveryAction action,HANDLE& process) {
+    std::wstring executable,arguments,verb=L"open";
+    auto system_directory=system_file(L"");
+    if(system_directory.empty()) return {false,L"Не удалось определить системную папку Windows."};
+    system_directory.pop_back();
+    const auto script=recovery_script(action,system_directory);
+    if(action==RecoveryAction::defender_ui) executable=L"windowsdefender:";
+    else if(action==RecoveryAction::advanced_startup) executable=L"ms-settings:recovery";
+    else if(action==RecoveryAction::startup_settings) executable=L"ms-settings:startupapps";
+    else if(action==RecoveryAction::system_info) executable=system_file(L"msinfo32.exe");
+    else if(action==RecoveryAction::restore_points) executable=system_file(L"rstrui.exe");
+    else if(action==RecoveryAction::powershell_admin) {
+        executable=system_file(L"WindowsPowerShell\\v1.0\\powershell.exe"); arguments=L"-NoLogo -NoProfile -NoExit"; verb=L"runas";
+    } else if(action==RecoveryAction::cmd_admin) {
+        executable=system_file(L"cmd.exe"); arguments=L"/d"; verb=L"runas";
+    } else if(action==RecoveryAction::startup_audit||action==RecoveryAction::diagnostic_report) {
+        const auto id=unique_id(),directory=data_directory()+L"\\Reports";
+        if(id.empty()||!make_directory(directory)) return {false,L"Не удалось создать папку отчётов."};
+        std::wstring contents;
+        if(action==RecoveryAction::startup_audit) contents=startup_audit();
+        else {
+            contents=L"CrimeSQL — диагностика\r\n"+system_summary()+L"\r\nWinDefend: "+defender_status()+L"\r\n";
+            for(const auto& policy:policies) {
+                const auto observation=read_policy(policy); const auto health=classify(policy,observation);
+                contents+=std::wstring(policy.name)+L": "+(health==Health::clear?L"ограничений не найдено":health==Health::blocked?L"ограничение":L"неизвестно/ошибка")+L"\r\n";
+            }
+            contents+=L"\r\nЭто проверка настроек, а не результат антивирусного сканирования.\r\n";
+        }
+        const auto file=directory+L"\\"+id+L".txt";
+        if(!write_unicode_file(file,contents,true)) return {false,L"Не удалось сохранить отчёт."};
+        executable=system_file(L"notepad.exe"); arguments=L"\""+file+L"\"";
+    } else if(!script.empty()) {
+        const auto directory=data_directory()+L"\\Reports",id=unique_id();
+        if(id.empty()||!make_directory(directory)) return {false,L"Не удалось подготовить журнал операции."};
+        const auto transcript=directory+L"\\"+id+L".txt";
+        const auto body=maintenance_wrapper(script,transcript);
+        executable=system_file(L"WindowsPowerShell\\v1.0\\powershell.exe");
+        arguments=L"-NoLogo -NoProfile -Command \""+body+L"\""; verb=L"runas";
+    } else return {false,L"Неизвестная операция."};
+    SHELLEXECUTEINFOW launch{}; launch.cbSize=sizeof(launch); launch.hwnd=owner;
+    launch.fMask=SEE_MASK_FLAG_NO_UI|(script.empty()?0:SEE_MASK_NOCLOSEPROCESS);
+    launch.lpVerb=verb.c_str(); launch.lpFile=executable.c_str(); launch.lpParameters=arguments.empty()?nullptr:arguments.c_str(); launch.nShow=SW_SHOWNORMAL;
+    if(!ShellExecuteExW(&launch)) return {false,L"Операция не запущена: "+error_text(GetLastError())};
+    if(!script.empty()) process=launch.hProcess;
+    return {true,script.empty()?L"Запрос открытия инструмента передан Windows.":
+        L"Окно операции открыто. Результат и код завершения показаны в нём; журнал сохраняется в Reports. Это не подтверждение отсутствия угроз."};
+}
 void apply_window_theme(HWND window) {
     BOOL dark=TRUE;
     if(FAILED(DwmSetWindowAttribute(window,20,&dark,sizeof(dark))))

@@ -1,4 +1,5 @@
 #include "windows_features.h"
+#include "mini_games.h"
 #include <objbase.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <cwchar>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace {
@@ -17,9 +19,40 @@ constexpr COLORREF ink=RGB(235,241,251), muted=RGB(140,155,179), teal=RGB(85,230
 constexpr int nav_base=100, scan_id=200, fix_base=210, mouse_id=220, keyboard_id=221, tools_base=230;
 constexpr int defender_id=240, lab_id=250, autorun_id=260, priority_id=261, animate_id=262, bind_id=263, copy_id=270, reset_id=280, game_base=300;
 constexpr int reaction_id=281;
+constexpr int game_tab_base=500,tool_tab_base=600,action_base=700;
+int selected_game=0,tool_category=0;
+nh::TicTacToe tic;
+nh::Puzzle15 puzzle;
+nh::LightsOut lights;
+nh::SimonGame simon;
+ULONGLONG simon_started=0;
+int simon_flash=-1;
 HWND window=nullptr;
 std::map<int,HWND> controls;
 std::map<int,bool> hovered;
+std::map<int,RECT> desired_layout;
+bool ui_test_mode=false;
+bool active_window=false;
+UINT timer_interval=0;
+void schedule_timer();
+void refresh_board();
+struct PaintSurface {
+    HDC dc=nullptr;
+    HBITMAP bitmap=nullptr;
+    HGDIOBJ original=nullptr;
+    int width=0,height=0;
+    void clear() {
+        if(dc) { SelectObject(dc,original); DeleteObject(bitmap); DeleteDC(dc); }
+        dc=nullptr; bitmap=nullptr; original=nullptr; width=height=0;
+    }
+    void resize(HDC reference,int w,int h) {
+        if(dc&&width==w&&height==h) return;
+        clear(); dc=CreateCompatibleDC(reference); bitmap=CreateCompatibleBitmap(reference,w,h);
+        original=SelectObject(dc,bitmap); width=w; height=h;
+    }
+    ~PaintSurface() { clear(); }
+} main_surface;
+std::map<int,PaintSurface> button_surfaces;
 std::array<HWND,3> key_fields{};
 std::array<bool,3> bound{};
 std::array<nh::Binding,3> pending_keys{};
@@ -82,21 +115,68 @@ HWND button(int id,const wchar_t* label) {
     auto h=CreateWindowW(L"BUTTON",label,WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
     controls[id]=h; return h;
 }
+LRESULT inspect_button_pixels(HWND control) {
+    RECT client{}; GetClientRect(control,&client);
+    const int width=client.right,height=client.bottom;
+    if(width<=0||height<=0) return 0xC580;
+    HDC dc=CreateCompatibleDC(nullptr);
+    BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth=width;
+    info.bmiHeader.biHeight=-height; info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB;
+    void* pixels=nullptr; HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
+    if(!bitmap||!pixels) { if(bitmap) DeleteObject(bitmap); DeleteDC(dc); return 0xC580; }
+    auto original=SelectObject(dc,bitmap); auto data=static_cast<DWORD*>(pixels);
+    const int count=width*height;
+    auto whites=[&] { int n=0; for(int i=0;i<count;++i) if((data[i]&255)>220&&((data[i]>>8)&255)>220&&((data[i]>>16)&255)>220) ++n; return static_cast<double>(n)/count; };
+    LRESULT flags=0;
+    if(HDC displayed=GetDC(control)) {
+        if(BitBlt(dc,0,0,width,height,displayed,0,0,SRCCOPY)) { GdiFlush(); if(whites()>0.75) flags|=8; }
+        ReleaseDC(control,displayed);
+    }
+    std::fill_n(data,count,0x00010203);
+    SendMessageW(control,WM_ERASEBKGND,reinterpret_cast<WPARAM>(dc),0); GdiFlush();
+    if(whites()>=0.02) flags|=1;
+    std::fill_n(data,count,0x00010203);
+    SendMessageW(control,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT); GdiFlush();
+    int untouched=0; for(int i=0;i<count;++i) if((data[i]&0xffffff)==0x010203) ++untouched;
+    if(static_cast<double>(untouched)/count>=0.02) flags|=2;
+    if(whites()>=0.2) flags|=4;
+    SelectObject(dc,original); DeleteObject(bitmap); DeleteDC(dc);
+    return 0xC500|flags;
+}
 LRESULT CALLBACK button_proc(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR ref) {
     int id=static_cast<int>(ref);
+    if(m==WM_APP+41&&ui_test_mode) return inspect_button_pixels(h);
+    if(m==WM_ERASEBKGND) return 1;
+    if(m==WM_PAINT||m==WM_PRINTCLIENT) {
+        PAINTSTRUCT ps{};
+        HDC destination=m==WM_PAINT?BeginPaint(h,&ps):reinterpret_cast<HDC>(w);
+        RECT client{}; GetClientRect(h,&client);
+        if(destination&&client.right>0&&client.bottom>0) {
+            auto& buffer=button_surfaces[id]; buffer.resize(destination,client.right,client.bottom);
+            DRAWITEMSTRUCT item{}; item.CtlType=ODT_BUTTON; item.CtlID=static_cast<UINT>(id);
+            item.itemAction=ODA_DRAWENTIRE; item.hwndItem=h; item.hDC=buffer.dc; item.rcItem=client;
+            if(!IsWindowEnabled(h)) item.itemState|=ODS_DISABLED;
+            if(GetFocus()==h) item.itemState|=ODS_FOCUS;
+            if(SendMessageW(h,BM_GETSTATE,0,0)&BST_PUSHED) item.itemState|=ODS_SELECTED;
+            SendMessageW(GetParent(h),WM_DRAWITEM,id,reinterpret_cast<LPARAM>(&item));
+            BitBlt(destination,0,0,client.right,client.bottom,buffer.dc,0,0,SRCCOPY);
+        }
+        if(m==WM_PAINT) EndPaint(h,&ps);
+        return 0;
+    }
     if(id>=400&&id<403&&(m==WM_KEYDOWN||m==WM_SYSKEYDOWN)) {
         unsigned modifiers=((GetKeyState(VK_CONTROL)&0x8000)?MOD_CONTROL:0)|((GetKeyState(VK_MENU)&0x8000)?MOD_ALT:0)|((GetKeyState(VK_SHIFT)&0x8000)?MOD_SHIFT:0);
         nh::Binding candidate{modifiers,static_cast<unsigned>(w)};
         if(nh::valid_binding(candidate)) { pending_keys[static_cast<std::size_t>(id-400)]=candidate; SetWindowTextW(h,nh::binding_name(candidate).c_str()); }
         return 0;
     }
-    if(m==WM_MOUSEMOVE) { TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,h,0}; TrackMouseEvent(&t); hovered[id]=true; InvalidateRect(h,nullptr,FALSE); }
+    if(m==WM_MOUSEMOVE&&!hovered[id]) { TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,h,0}; TrackMouseEvent(&t); hovered[id]=true; InvalidateRect(h,nullptr,FALSE); }
     else if(m==WM_MOUSELEAVE) { hovered[id]=false; InvalidateRect(h,nullptr,FALSE); }
-    else if(m==WM_NCDESTROY) RemoveWindowSubclass(h,button_proc,1);
+    else if(m==WM_NCDESTROY) { button_surfaces.erase(id); RemoveWindowSubclass(h,button_proc,1); }
     return DefSubclassProc(h,m,w,l);
 }
 void place(int id,int x,int y,int w,int h) {
-    ShowWindow(controls.at(id),SW_SHOW); MoveWindow(controls.at(id),px(x),px(y),px(w),px(h),TRUE);
+    desired_layout[id]={px(x),px(y),px(x+w),px(y+h)};
 }
 std::wstring status(std::size_t i) {
     if(!scanned) return L"Ожидает диагностики";
@@ -108,9 +188,9 @@ std::wstring status(std::size_t i) {
 void layout() {
     if(!window) return;
     RECT r{}; GetClientRect(window,&r); int width=logical(r.right),height=logical(r.bottom),x=270,c=width-x-32;
-    for(auto& entry:controls) ShowWindow(entry.second,SW_HIDE);
-    for(int i=0;i<7;++i) { place(nav_base+i,18,181+i*48,200,42); InvalidateRect(controls.at(nav_base+i),nullptr,FALSE); }
-    for(auto h:key_fields) ShowWindow(h,page==4?SW_SHOW:SW_HIDE);
+    if(r.right<=0||r.bottom<=0) { schedule_timer(); return; }
+    desired_layout.clear();
+    for(int i=0;i<7;++i) place(nav_base+i,18,181+i*48,200,42);
     if(page==0) {
         place(scan_id,x+26,289,190,42); place(mouse_id,x,526,(c-14)/2,54); place(keyboard_id,x+(c+14)/2,526,(c-14)/2,54);
         place(defender_id,x,596,c,45);
@@ -123,21 +203,42 @@ void layout() {
         place(mouse_id,x,573,(c-14)/2,48); place(keyboard_id,x+(c+14)/2,573,(c-14)/2,48);
     } else if(page==2) place(lab_id,x+24,518,310,48);
     else if(page==3) {
-        for(int i=0;i<5;++i) place(tools_base+i,x+c-154,184+i*84,130,38);
-        place(defender_id,x,623,c,45);
+        for(int i=0;i<4;++i) place(tool_tab_base+i,x+i*((c+12)/4),163,(c-36)/4,36);
+        for(int i=0;i<4;++i) place(action_base+tool_category*4+i,x+c-158,232+i*108,136,40);
     } else if(page==4) {
         place(autorun_id,x+c-170,181,145,38); place(priority_id,x+c-170,275,145,38); place(animate_id,x+c-170,369,145,38);
         SetWindowTextW(controls.at(autorun_id),nh::autorun_enabled()?L"Отключить":L"Включить");
         SetWindowTextW(controls.at(priority_id),settings.high_priority?L"Обычный":L"Высокий");
         SetWindowTextW(controls.at(animate_id),settings.animations?L"Выключить":L"Включить");
-        for(int i=0;i<3;++i) { MoveWindow(key_fields[i],px(x+c-275),px(483+i*51),px(250),px(34),TRUE); SendMessageW(key_fields[i],WM_SETFONT,reinterpret_cast<WPARAM>(font(14,FW_NORMAL)),TRUE); }
+        for(int i=0;i<3;++i) place(400+i,x+c-275,483+i*51,250,34);
         place(bind_id,x+22,652,300,42);
     } else if(page==5) {
-        for(int i=0;i<16;++i) place(game_base+i,x+22+(i%4)*110,192+(i/4)*100,96,86);
-        place(reset_id,x+490,377,c-514,42);
-        place(reaction_id,x+490,545,c-514,44);
+        for(int i=0;i<6;++i) place(game_tab_base+i,x+(i%3)*((c+12)/3),161+(i/3)*42,(c-24)/3,34);
+        if(selected_game==0||selected_game==3) for(int i=0;i<16;++i) place(game_base+i,x+22+(i%4)*103,284+(i/4)*82,90,70);
+        if(selected_game==2) for(int i=0;i<9;++i) place(game_base+i,x+32+(i%3)*129,287+(i/3)*101,113,86);
+        if(selected_game==4) for(int i=0;i<4;++i) place(game_base+i,x+32+(i%2)*195,312+(i/2)*124,175,104);
+        if(selected_game==5) for(int i=0;i<25;++i) place(game_base+i,x+26+(i%5)*78,283+(i/5)*64,65,53);
+        place(reset_id,x+478,415,c-502,42);
+        if(selected_game==1) place(reaction_id,x+35,294,c-70,96);
     } else place(copy_id,x,height-112,240,42);
-    InvalidateRect(window,nullptr,FALSE);
+    auto batch=BeginDeferWindowPos(static_cast<int>(controls.size()));
+    for(const auto& entry:controls) {
+        const bool visible=desired_layout.count(entry.first)!=0;
+        const bool was_visible=(GetWindowLongPtrW(entry.second,GWL_STYLE)&WS_VISIBLE)!=0;
+        RECT current{}; GetWindowRect(entry.second,&current); MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&current),2);
+        RECT target=visible?desired_layout.at(entry.first):current;
+        if(visible==was_visible&&EqualRect(&target,&current)) continue;
+        const UINT flags=SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|(visible?SWP_SHOWWINDOW:SWP_HIDEWINDOW);
+        if(batch) batch=DeferWindowPos(batch,entry.second,nullptr,target.left,target.top,target.right-target.left,target.bottom-target.top,flags);
+        else SetWindowPos(entry.second,nullptr,target.left,target.top,target.right-target.left,target.bottom-target.top,flags);
+    }
+    if(batch) EndDeferWindowPos(batch);
+    RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW);
+    schedule_timer();
+}
+void refresh_board() {
+    for(int i=0;i<25;++i) InvalidateRect(controls.at(game_base+i),nullptr,FALSE);
+    InvalidateRect(window,nullptr,FALSE); schedule_timer();
 }
 void diagnose() {
     for(std::size_t i=0;i<4;++i) observations[i]=nh::read_policy(nh::policies[i]);
@@ -186,7 +287,7 @@ void task_manager() {
     else log(L"Windows передан запрос открытия диспетчера задач.");
 }
 void copy_log() {
-    std::wstring s=L"CrimeSQL dev system recovery 0.2.0\r\n";
+    std::wstring s=L"CrimeSQL dev system recovery 0.3.0\r\n";
     for(auto& entry:journal) s+=entry+L"\r\n";
     HGLOBAL memory=GlobalAlloc(GMEM_MOVEABLE,(s.size()+1)*sizeof(wchar_t)); if(!memory) return;
     void* pointer=GlobalLock(memory); if(!pointer) { GlobalFree(memory); return; }
@@ -197,7 +298,25 @@ void copy_log() {
     result({ok,ok?L"Журнал скопирован. Проверьте пути к личным файлам перед отправкой.":L"Не удалось скопировать журнал."});
 }
 void command(int id) {
-    if(id>=nav_base&&id<nav_base+7) { nav_from=nav_position; nav_started=GetTickCount64(); page=id-nav_base; layout(); return; }
+    if(id>=nav_base&&id<nav_base+7) {
+        if(page==id-nav_base) return;
+        nav_from=nav_position; nav_started=GetTickCount64(); page=id-nav_base;
+        if(page==5&&selected_game==4&&simon.showing()) simon_started=GetTickCount64();
+        layout(); return;
+    }
+    if(id>=game_tab_base&&id<game_tab_base+6) {
+        selected_game=id-game_tab_base;
+        if(selected_game==4&&simon.showing()) simon_started=GetTickCount64();
+        layout(); refresh_board(); return;
+    }
+    if(id>=tool_tab_base&&id<tool_tab_base+4) { tool_category=id-tool_tab_base; layout(); return; }
+    if(id>=action_base&&id<action_base+16) {
+        const auto action=static_cast<nh::RecoveryAction>(id-action_base); const auto& info=nh::action_info(action);
+        const bool maintenance=!nh::recovery_script(action,L"C:\\Windows\\System32").empty();
+        if(maintenance&&scan_process) { result({false,L"Другое окно операции ещё открыто. Закройте его после просмотра результата."}); return; }
+        if(info.confirmation[0]&&MessageBoxW(window,info.confirmation,info.title,MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING)!=IDYES) return;
+        result(nh::launch_recovery_action(window,action,scan_process)); schedule_timer(); return;
+    }
     if(id==scan_id) diagnose();
     else if(id>=fix_base&&id<fix_base+4) restore(static_cast<std::size_t>(id-fix_base));
     else if(id==mouse_id) result(nh::recover_mouse());
@@ -207,7 +326,7 @@ void command(int id) {
         if(id==tools_base+1) task_manager();
         else { std::wstring error; if(!nh::open_tool(window,static_cast<nh::Tool>(id-tools_base),error)) result({false,error}); else log(L"Запрос открытия системного инструмента передан Windows."); }
     } else if(id==defender_id) {
-        if(scan_process) { result({false,L"Команда проверки уже выполняется. Состояние смотрите в Безопасности Windows."}); return; }
+        if(scan_process) { result({false,L"Другое окно операции ещё открыто. Закройте его после просмотра результата."}); return; }
         if(MessageBoxW(window,L"Запустить полную проверку Microsoft Defender? Windows запросит повышение прав. Проверка может занять длительное время.",L"Проверка на вирусы",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES) result(nh::start_defender_scan(window,scan_process));
     } else if(id==lab_id) {
         if(!nh::sandbox_available()) { result({false,L"Windows Sandbox недоступна. Нужны Windows Pro/Enterprise/Education, виртуализация и включённый компонент «Песочница Windows». На Home функция недоступна. EXE не запускался."}); return; }
@@ -230,7 +349,16 @@ void command(int id) {
         result(saved); layout();
     } else if(id==bind_id) apply_keys();
     else if(id==copy_id) copy_log();
-    else if(id==reset_id) { game.reset(static_cast<unsigned>(GetTickCount64())); conceal_at=0; layout(); }
+    else if(id==reset_id) {
+        const auto seed=static_cast<unsigned>(GetTickCount64());
+        if(selected_game==0) { game.reset(seed); conceal_at=0; revealed_at.fill(0); }
+        if(selected_game==1) { reaction_at=0; reaction_ready=false; reaction_score=L"Дождись сигнала и нажми кнопку."; SetWindowTextW(controls.at(reaction_id),L"Начать тест реакции"); }
+        if(selected_game==2) tic.reset();
+        if(selected_game==3) puzzle.reset(seed);
+        if(selected_game==4) { simon.reset(seed); simon_started=GetTickCount64(); simon_flash=-1; }
+        if(selected_game==5) lights.reset(seed);
+        refresh_board();
+    }
     else if(id==reaction_id) {
         auto now=GetTickCount64();
         if(!reaction_at) { reaction_at=now+1500+(now%2500); reaction_ready=false; reaction_score=L"Жди сигнала… Не нажимай раньше времени."; SetWindowTextW(controls.at(reaction_id),L"Жди сигнала…"); }
@@ -240,12 +368,20 @@ void command(int id) {
         }
         InvalidateRect(window,nullptr,FALSE);
     }
-    else if(id>=game_base&&id<game_base+16&&game.choose(id-game_base)) {
-        revealed_at[static_cast<std::size_t>(id-game_base)]=GetTickCount64();
-        if(game.waiting()) conceal_at=GetTickCount64()+850;
-        for(int i=0;i<16;++i) InvalidateRect(controls.at(game_base+i),nullptr,FALSE);
-        if(game.found()==8) log(L"Все пары найдены! Ходов: "+std::to_wstring(game.moves()));
-        InvalidateRect(window,nullptr,FALSE);
+    else if(id>=game_base&&id<game_base+25) {
+        const int index=id-game_base;
+        if(selected_game==0&&game.choose(index)) {
+            revealed_at[static_cast<std::size_t>(index)]=GetTickCount64();
+            if(game.waiting()) conceal_at=GetTickCount64()+850;
+            if(game.found()==8) log(L"Все пары найдены! Ходов: "+std::to_wstring(game.moves()));
+        }
+        if(selected_game==2) tic.play(index);
+        if(selected_game==3) puzzle.slide(index);
+        if(selected_game==4) {
+            if(simon.accept(index)==nh::SimonGame::Answer::round_complete) { simon_started=GetTickCount64()+650; simon_flash=-1; }
+        }
+        if(selected_game==5) lights.toggle(index);
+        refresh_board();
     }
 }
 void orbit(HDC dc,int x,int y,double phase) {
@@ -266,15 +402,15 @@ void paint(HDC dc) {
     RECT sr{0,0,px(236),r.bottom}; brush=CreateSolidBrush(side); FillRect(dc,&sr,brush); DeleteObject(brush);
     shape(dc,22,28,48,48,RGB(38,33,66),RGB(60,48,96)); text(dc,L"C/",32,32,42,39,25,violet,FW_BOLD);
     text(dc,L"CrimeSQL",82,27,145,31,23,ink,FW_BOLD); text(dc,L"DEV / SYSTEM RECOVERY",83,60,140,18,9,muted,FW_SEMIBOLD);
-    shape(dc,22,108,192,31,RGB(20,39,38),RGB(35,65,58),18); text(dc,L"●  LOCAL-FIRST / v0.2.0",36,110,173,26,10,teal,FW_SEMIBOLD);
+    shape(dc,22,108,192,31,RGB(20,39,38),RGB(35,65,58),18); text(dc,L"●  LOCAL-FIRST / v0.3.0",36,110,173,26,10,teal,FW_SEMIBOLD);
     text(dc,L"РАБОЧЕЕ ПРОСТРАНСТВО",24,150,190,20,10,muted,FW_SEMIBOLD);
     shape(dc,18,181+static_cast<int>(nav_position*48),200,42,RGB(42,35,67),RGB(66,53,102),14);
     shape(dc,18,height-172,200,100,panel); text(dc,L"АВАРИЙНЫЙ ВХОД",32,height-160,170,19,10,muted,FW_BOLD);
     text(dc,L"Ctrl + Alt + Del",32,height-135,170,25,16,teal,FW_SEMIBOLD);
     text(dc,L"Если ввод полностью заблокирован",32,height-104,170,30,10,muted,FW_NORMAL,true);
     text(dc,L"CrimeSQL dev • Windows 10 / 11",24,height-43,196,24,10,muted);
-    const wchar_t* titles[]{L"Верни контроль.",L"Восстановление доступа",L"Лаборатория EXE",L"Системные инструменты",L"Твой центр управления",L"Перерыв: найди пары",L"Журнал действий"};
-    const wchar_t* captions[]{L"Диагностика, восстановление и изолированный анализ — в одном месте.",L"Распознанные ограничения профиля. Изменения — с резервной копией.",L"Наблюдай за изменениями файлов внутри Windows Sandbox.",L"Средства Windows для проверки и восстановления системы.",L"Горячие клавиши, автозапуск и поведение приложения.",L"Восемь пар. Никаких сетевых сервисов, только немного отдыха.",L"История сеанса: до 2000 записей, без отправки на сервер."};
+    const wchar_t* titles[]{L"Верни контроль.",L"Восстановление доступа",L"Лаборатория EXE",L"Системные инструменты",L"Твой центр управления",L"Игровая комната",L"Журнал действий"};
+    const wchar_t* captions[]{L"Диагностика, восстановление и изолированный анализ — в одном месте.",L"Распознанные ограничения профиля. Изменения — с резервной копией.",L"Наблюдай за изменениями файлов внутри Windows Sandbox.",L"Средства Windows для проверки и восстановления системы.",L"Горячие клавиши, автозапуск и поведение приложения.",L"Шесть мини-игр без сетевых сервисов. Небольшой перерыв.",L"История сеанса: до 2000 записей, без отправки на сервер."};
     text(dc,L"CRIMESQL DEV SYSTEM RECOVERY",x,24,c,20,10,violet,FW_BOLD);
     text(dc,titles[page],x,57,c-(page==1?200:0),44,31,ink,FW_BOLD); text(dc,captions[page],x,111,c,30,13,muted);
     if(page==0) {
@@ -318,10 +454,17 @@ void paint(HDC dc) {
         text(dc,L"Журнал — внутри Sandbox; при закрытии он удаляется. Это события всей среды, включая фоновые процессы. Они не доказывают, что конкретный EXE создал каждый файл.",x,610,c,68,13,muted,FW_NORMAL,true);
         text(dc,L"Нужны Windows Pro / Enterprise / Education, виртуализация и компонент Sandbox. На Home лаборатория недоступна.",x,696,c,48,12,amber,FW_NORMAL,true);
     } else if(page==3) {
-        const wchar_t* names[]{L"Безопасность Windows",L"Диспетчер задач",L"Сведения о системе",L"Восстановление Windows",L"Резервные копии .reg"};
-        const wchar_t* notes[]{L"Защита, журнал обнаружений и автономная проверка.",L"Восстановить ограничение и открыть процессы.",L"Оборудование и компоненты Windows.",L"Открыть параметры восстановления системы.",L"Исходные значения перед изменением политик."};
-        for(int i=0;i<5;++i) { shape(dc,x,167+i*84,c,72,panel); text(dc,names[i],x+20,177+i*84,c-205,27,16,ink,FW_SEMIBOLD); text(dc,notes[i],x+20,208+i*84,c-205,20,12,muted); }
-        text(dc,scan_process?L"Команда проверки запущена. Итог смотри в Безопасности Windows.":L"Полная проверка использует Microsoft Defender и может запросить права администратора.",x,687,c,47,12,muted,FW_NORMAL,true);
+        for(int i=0;i<4;++i) {
+            const auto& info=nh::action_info(static_cast<nh::RecoveryAction>(tool_category*4+i));
+            shape(dc,x,216+i*108,c,92,panel);
+            text(dc,info.title,x+20,228+i*108,c-210,29,17,ink,FW_SEMIBOLD);
+            text(dc,info.description,x+20,265+i*108,c-210,31,12,muted,FW_NORMAL,true);
+        }
+        text(dc,scan_process?L"Окно операции открыто. Результат показан в нём; журнал — в Reports.":
+            tool_category==0?L"Проверки выполняет Microsoft Defender. Автономная проверка перезагружает компьютер после подтверждения.":
+            tool_category==1?L"SFC/DISM исправляют повреждения Windows. Обнаружением и удалением угроз занимается антивирус.":
+            tool_category==2?L"PowerShell открывается в текущей Windows. В WinRE штатно есть CMD; PowerShell обычно не установлен.":
+            L"Отчёты могут содержать личные пути и команды автозапуска. Проверь их перед отправкой.",x,679,c,53,12,muted,FW_NORMAL,true);
     } else if(page==4) {
         const wchar_t* names[]{L"Запускать вместе с Windows",L"Приоритет приложения",L"Плавные анимации"};
         std::wstring notes[]{nh::autorun_enabled()?L"Включён • для текущего пользователя":L"Выключен • запуск свёрнутым после входа",settings.high_priority?L"Высокий • только процесс CrimeSQL":L"Обычный • рекомендуемый режим",settings.animations?L"Включены • движение акцентов":L"Выключены • уменьшенное движение"};
@@ -331,11 +474,18 @@ void paint(HDC dc) {
         for(int i=0;i<3;++i) { text(dc,labels[i],x+22,482+i*51,c-320,24,14,ink,FW_SEMIBOLD); text(dc,bound[i]?L"Бинд зарегистрирован":L"Бинд недоступен — выбери другой",x+22,506+i*51,c-320,17,10,bound[i]?teal:amber); }
         text(dc,L"Нажми сочетание в поле: Ctrl/Alt + буква, цифра или F1–F24. Бинды работают, пока приложение запущено.",x,725,c,38,11,muted,FW_NORMAL,true);
     } else if(page==5) {
-        shape(dc,x,168,466,430,panel); text(dc,L"MEMORY BREAK",x+490,192,c-510,24,11,teal,FW_BOLD);
-        text(dc,std::to_wstring(game.found())+L" / 8",x+490,237,c-510,55,40,ink,FW_BOLD); text(dc,L"пар найдено",x+490,293,c-510,26,14,muted);
-        text(dc,L"Ходов: "+std::to_wstring(game.moves()),x+490,337,c-510,25,16,violet,FW_SEMIBOLD);
-        text(dc,game.found()==8?L"Все пары найдены. Отличная работа!":L"Открывай две карточки и запоминай совпадения.",x+490,447,c-510,72,14,muted,FW_NORMAL,true);
-        text(dc,reaction_score,x+490,603,c-510,50,13,teal,FW_NORMAL,true);
+        if(selected_game!=1) shape(dc,x,267,440,350,panel);
+        const wchar_t* names[]{L"НАЙДИ ПАРЫ",L"ТЕСТ РЕАКЦИИ",L"КРЕСТИКИ-НОЛИКИ",L"ПЯТНАШКИ",L"САЙМОН",L"LIGHTS OUT"};
+        text(dc,names[selected_game],selected_game==1?x+22:x+478,selected_game==1?252:276,selected_game==1?c-44:c-500,26,12,teal,FW_BOLD);
+        std::wstring score,help;
+        if(selected_game==0) { score=std::to_wstring(game.found())+L" / 8"; help=L"Ходов: "+std::to_wstring(game.moves())+L". Открывай по две карточки и запоминай совпадения."; }
+        if(selected_game==1) { score=L"Реакция"; help=reaction_score; }
+        if(selected_game==2) { score=tic.status()==2?L"Победа O":tic.status()==3?L"Ничья":tic.status()==1?L"Победа X":L"Твой ход"; help=L"Ты играешь крестиками. Собери три в ряд. Компьютер отвечает ноликами."; }
+        if(selected_game==3) { score=puzzle.solved()?L"Собрано!":L"Ходы: "+std::to_wstring(puzzle.moves()); help=L"Расположи плитки 1–15 по порядку. Нажимай плитку рядом с пустой клеткой. Каждая партия решаема."; }
+        if(selected_game==4) { score=simon.lost()?L"Ошибка":L"Уровень "+std::to_wstring(simon.sequence().size()); help=simon.lost()?L"Последовательность нарушена. Начни новую игру.":simon.showing()?L"Смотри на подсветку и запоминай последовательность.":L"Повтори показанную последовательность кнопками 1–4."; }
+        if(selected_game==5) { score=lights.solved()?L"Победа!":L"Ходы: "+std::to_wstring(lights.moves()); help=L"Погаси все огни. Нажатие переключает клетку и четырёх соседей. Партии имеют решение."; }
+        if(selected_game!=1) text(dc,score,x+478,327,c-500,56,30,ink,FW_BOLD);
+        text(dc,help,x+478,482,c-500,118,14,muted,FW_NORMAL,true);
         text(dc,L"Мини-игры не изменяют настройки системы и не влияют на защиту.",x,686,c,36,12,muted);
     } else {
         shape(dc,x,165,c,height-306,panel);
@@ -345,11 +495,27 @@ void paint(HDC dc) {
     }
     text(dc,L"CrimeSQL dev system recovery / LOCAL TOOLS. CLEAR ACTIONS.",x,height-33,c,19,10,muted);
 }
+void schedule_timer() {
+    if(!window) return;
+    const auto now=GetTickCount64();
+    UINT interval=0;
+    const bool moving=settings.animations&&now<nav_started+220;
+    if(moving||(settings.animations&&page==0&&active_window&&!IsIconic(window))) interval=33;
+    if(settings.animations&&page==5&&selected_game==0) for(auto timestamp:revealed_at)
+        if(timestamp&&now-timestamp<190) interval=33;
+    if(conceal_at||(reaction_at&&!reaction_ready&&page==5&&selected_game==1)) interval=interval?interval:50;
+    if(page==5&&selected_game==4&&simon.showing()&&active_window&&!IsIconic(window)) interval=interval?interval:50;
+    if(scan_process&&!interval) interval=1000;
+    if(interval==timer_interval) return;
+    KillTimer(window,1); timer_interval=interval;
+    if(interval) SetTimer(window,1,interval,nullptr);
+}
 LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
+    if(message==WM_APP+42&&ui_test_mode) return timer_interval;
     switch(message) {
         case WM_CREATE: {
             window=hwnd; scale=monitor_scale(GetDpiForWindow(hwnd),MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST));
-            settings=nh::load_settings(); started=GetTickCount64();
+            settings=ui_test_mode?nh::Settings{}:nh::load_settings(); started=GetTickCount64();
             const wchar_t* nav[]{L"01   Панель управления",L"02   Восстановление",L"03   Лаборатория EXE",L"04   Инструменты",L"05   Настройки и бинды",L"06   Перерыв",L"07   Журнал действий"};
             for(int i=0;i<7;++i) button(nav_base+i,nav[i]);
             button(scan_id,L"Проверить систему  →"); for(int i=0;i<4;++i) button(fix_base+i,L"Восстановить");
@@ -357,32 +523,52 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             for(int i=0;i<5;++i) button(tools_base+i,L"Открыть  ↗");
             button(defender_id,L"Запустить полную проверку Microsoft Defender"); button(lab_id,L"Выбрать EXE и открыть Sandbox  ↗");
             button(autorun_id,L"Включить"); button(priority_id,L"Высокий"); button(animate_id,L"Выключить"); button(bind_id,L"Сохранить и применить бинды");
-            button(copy_id,L"Копировать весь журнал"); button(reset_id,L"Новая игра"); for(int i=0;i<16;++i) button(game_base+i,L"Карточка");
+            button(copy_id,L"Копировать весь журнал"); button(reset_id,L"Новая игра"); for(int i=0;i<25;++i) button(game_base+i,L"Клетка");
             button(reaction_id,L"Начать тест реакции");
+            const wchar_t* games[]{L"Пары",L"Реакция",L"Крестики-нолики",L"Пятнашки",L"Саймон",L"Lights Out"};
+            for(int i=0;i<6;++i) button(game_tab_base+i,games[i]);
+            const wchar_t* categories[]{L"Защита",L"Система",L"Консоли / WinRE",L"Отчёты"};
+            for(int i=0;i<4;++i) button(tool_tab_base+i,categories[i]);
+            for(int i=0;i<16;++i) button(action_base+i,nh::recovery_script(static_cast<nh::RecoveryAction>(i),L"C:\\Windows\\System32").empty()?L"Открыть  →":L"Запустить  →");
             for(auto& entry:controls) SetWindowSubclass(entry.second,button_proc,1,static_cast<DWORD_PTR>(entry.first));
             for(int i=0;i<3;++i) { key_fields[static_cast<std::size_t>(i)]=button(400+i,L"Нажмите сочетание"); SetWindowSubclass(key_fields[static_cast<std::size_t>(i)],button_proc,1,400+i); }
             set_key_fields(); if(!register_keys(settings.bindings)) log(L"Некоторые горячие клавиши заняты. Измените их в Настройках.");
             if(settings.high_priority) { auto r=nh::set_high_priority(true); if(!r.success) { settings.high_priority=false; log(r.message); } }
             BOOL animation=TRUE; if(SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animation,0)&&!animation) settings.animations=false;
             machine=nh::system_summary(); game.reset(static_cast<unsigned>(GetTickCount64()));
-            log(L"CrimeSQL 0.2.0 запущен. Восстановление без команды пользователя не выполняется.");
-            SetTimer(hwnd,1,33,nullptr); layout(); return 0;
+            puzzle.reset(static_cast<unsigned>(started)); lights.reset(static_cast<unsigned>(started)); simon.reset(static_cast<unsigned>(started));
+            log(L"CrimeSQL 0.3.0 запущен. Восстановление без команды пользователя не выполняется.");
+            layout(); return 0;
         }
         case WM_TIMER: {
             auto now=GetTickCount64(); double progress=settings.animations?std::min(1.0,(now-nav_started)/220.0):1.0;
             double previous=nav_position; nav_position=nav_from+(page-nav_from)*(1-std::pow(1-progress,3));
-            if(previous!=nav_position||(settings.animations&&page==0&&GetForegroundWindow()==hwnd)) InvalidateRect(hwnd,nullptr,FALSE);
+            if(previous!=nav_position) { RECT dirty{px(16),px(179),px(220),px(181+7*48)}; InvalidateRect(hwnd,&dirty,FALSE); }
+            if(settings.animations&&page==0&&active_window&&!IsIconic(hwnd)) {
+                RECT client{}; GetClientRect(hwnd,&client);
+                RECT dirty{client.right-px(253),px(167),client.right-px(62),px(352)};
+                InvalidateRect(hwnd,&dirty,FALSE);
+            }
             if(conceal_at&&now>=conceal_at) { game.conceal(); conceal_at=0; for(int i=0;i<16;++i) InvalidateRect(controls.at(game_base+i),nullptr,FALSE); }
             if(reaction_at&&!reaction_ready&&now>=reaction_at) { reaction_ready=true; SetWindowTextW(controls.at(reaction_id),L"СЕЙЧАС! Нажми"); }
-            if(settings.animations&&page==5) for(int i=0;i<16;++i) if(revealed_at[static_cast<std::size_t>(i)]&&now-revealed_at[static_cast<std::size_t>(i)]<190) InvalidateRect(controls.at(game_base+i),nullptr,FALSE);
+            if(settings.animations&&page==5&&selected_game==0) for(int i=0;i<16;++i) if(revealed_at[static_cast<std::size_t>(i)]&&now-revealed_at[static_cast<std::size_t>(i)]<190) InvalidateRect(controls.at(game_base+i),nullptr,FALSE);
+            if(page==5&&selected_game==4&&simon.showing()&&active_window&&!IsIconic(hwnd)) {
+                int flash=-1;
+                if(now>=simon_started) {
+                    const auto elapsed=now-simon_started, index=elapsed/600;
+                    if(index>=simon.sequence().size()) { simon.allow_input(); InvalidateRect(hwnd,nullptr,FALSE); }
+                    else if(elapsed%600<350) flash=simon.sequence()[static_cast<std::size_t>(index)];
+                }
+                if(flash!=simon_flash) { simon_flash=flash; for(int i=0;i<4;++i) InvalidateRect(controls.at(game_base+i),nullptr,FALSE); }
+            }
             if(scan_process) {
                 DWORD code=STILL_ACTIVE;
                 if(GetExitCodeProcess(scan_process,&code)&&code!=STILL_ACTIVE) {
                     CloseHandle(scan_process); scan_process=nullptr;
-                    log(code==0?L"Команда проверки Defender завершена. Обнаружения смотрите в Безопасности Windows.":L"Команда Defender завершилась с ошибкой "+std::to_wstring(code)+L". Откройте Безопасность Windows.");
+                    log(L"Процесс окна операции завершился с кодом "+std::to_wstring(code)+L". Это не оценка отсутствия угроз. Смотрите вывод команды и Reports.");
                 }
             }
-            return 0;
+            schedule_timer(); return 0;
         }
         case WM_HOTKEY: {
             int focused=GetDlgCtrlID(GetFocus());
@@ -390,27 +576,39 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
                 pending_keys[static_cast<std::size_t>(focused-400)]=settings.bindings[static_cast<std::size_t>(w-1)];
                 SetWindowTextW(GetFocus(),nh::binding_name(pending_keys[static_cast<std::size_t>(focused-400)]).c_str());
             } else if(w==1) command(mouse_id); else if(w==2) command(keyboard_id); else if(w==3) task_manager();
-            return 0;
+            schedule_timer(); return 0;
         }
-        case WM_SIZE: layout(); return 0;
+        case WM_SIZE: if(w!=SIZE_MINIMIZED) layout(); else schedule_timer(); return 0;
+        case WM_ACTIVATE:
+            active_window=LOWORD(w)!=WA_INACTIVE;
+            if(active_window&&page==5&&selected_game==4&&simon.showing()) simon_started=GetTickCount64();
+            schedule_timer(); return 0;
         case WM_GETMINMAXINFO: reinterpret_cast<MINMAXINFO*>(l)->ptMinTrackSize={px(1200),px(850)}; return 0;
         case WM_DPICHANGED: {
             scale=monitor_scale(HIWORD(w),MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)); clear_fonts();
             auto rect=reinterpret_cast<RECT*>(l); SetWindowPos(hwnd,nullptr,rect->left,rect->top,px(1240),px(860),SWP_NOZORDER|SWP_NOACTIVATE); layout(); return 0;
         }
-        case WM_COMMAND: if(HIWORD(w)==BN_CLICKED) command(LOWORD(w)); return 0;
+        case WM_COMMAND: if(HIWORD(w)==BN_CLICKED) command(LOWORD(w)); schedule_timer(); return 0;
         case WM_DRAWITEM: {
-            auto item=reinterpret_cast<DRAWITEMSTRUCT*>(l); int id=static_cast<int>(item->CtlID),width=logical(item->rcItem.right),height=logical(item->rcItem.bottom);
-            bool nav=id>=nav_base&&id<nav_base+7,active=nav&&id-nav_base==page,primary=id==scan_id||id==lab_id||id==bind_id;
-            bool card=id>=game_base&&id<game_base+16;
-            bool inside_panel=card||(page==1&&id>=fix_base&&id<fix_base+4)||(page==2&&id==lab_id)||(page==3&&id>=tools_base&&id<tools_base+5)||page==4;
+            auto original=reinterpret_cast<DRAWITEMSTRUCT*>(l);
+            auto copy=*original; auto item=&copy;
+            int id=static_cast<int>(item->CtlID),width=logical(item->rcItem.right),height=logical(item->rcItem.bottom);
+            auto& surface=button_surfaces[id]; const bool direct=item->hDC!=surface.dc;
+            if(direct) { surface.resize(item->hDC,item->rcItem.right,item->rcItem.bottom); item->hDC=surface.dc; }
+            bool nav=id>=nav_base&&id<nav_base+7;
+            bool active=(nav&&id-nav_base==page)||(id>=game_tab_base&&id<game_tab_base+6&&id-game_tab_base==selected_game)||
+                (id>=tool_tab_base&&id<tool_tab_base+4&&id-tool_tab_base==tool_category);
+            bool primary=id==scan_id||id==lab_id||id==bind_id;
+            bool card=id>=game_base&&id<game_base+25;
+            bool binding=id>=400&&id<403;
+            bool inside_panel=card||(page==1&&id>=fix_base&&id<fix_base+4)||(page==2&&id==lab_id)||(page==3&&id>=action_base&&id<action_base+16)||page==4;
             COLORREF behind=nav?side:(page==0&&id==scan_id)?RGB(23,27,45):inside_panel?panel:bg;
             auto brush=CreateSolidBrush(behind); FillRect(item->hDC,&item->rcItem,brush); DeleteObject(brush);
-            COLORREF fill=primary?teal:active?RGB(42,35,67):hovered[id]?RGB(36,43,61):id>=400?RGB(27,34,51):nav?side:panel;
+            COLORREF fill=primary?teal:active?RGB(42,35,67):hovered[id]?RGB(36,43,61):binding?RGB(27,34,51):nav?side:panel;
             if(item->itemState&ODS_SELECTED) fill=RGB(49,59,80);
-            shape(item->hDC,0,0,width,height,fill,active?RGB(74,59,116):id>=400?line:fill,14);
+            shape(item->hDC,0,0,width,height,fill,active?RGB(74,59,116):binding?line:fill,14);
             wchar_t label[256]{}; GetWindowTextW(item->hwndItem,label,256); std::wstring title=label; int size=13,margin=15;
-            if(id>=game_base&&id<game_base+16) {
+            if(card&&selected_game==0&&id<game_base+16) {
                 int index=id-game_base; bool visible=game.visible(index);
                 title=visible?std::wstring(1,static_cast<wchar_t>(L'A'+game.value(index))):L"";
                 const auto age=GetTickCount64()-revealed_at[static_cast<std::size_t>(index)];
@@ -426,21 +624,50 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
                 }
                 if(progress<0.45) title.clear();
                 size=30; margin=35;
+            } else if(card) {
+                const int index=id-game_base;
+                COLORREF card_fill=RGB(27,34,51),edge=line;
+                title.clear(); size=28;
+                if(selected_game==2&&index<9) { const int value=tic.value(index); title=value==1?L"X":value==2?L"O":L""; edge=value?violet:line; }
+                if(selected_game==3&&index<16) { const int value=puzzle.value(index); title=value?std::to_wstring(value):L""; if(!value) card_fill=panel; }
+                if(selected_game==4&&index<4) {
+                    constexpr COLORREF colors[]{RGB(58,173,145),RGB(147,110,220),RGB(211,157,78),RGB(78,146,214)};
+                    const auto tint=colors[index];
+                    const bool flash=simon_flash==index;
+                    card_fill=flash?tint:RGB(GetRValue(tint)/3,GetGValue(tint)/3,GetBValue(tint)/3);
+                    edge=flash?ink:tint; title=std::to_wstring(index+1);
+                }
+                if(selected_game==5&&index<25) { const bool lit=lights.value(index); card_fill=lit?RGB(44,123,103):RGB(23,31,44); edge=lit?teal:line; title=lit?L"+":L""; }
+                if(hovered[id]&&selected_game!=4) edge=violet;
+                shape(item->hDC,0,0,width,height,card_fill,edge,16);
+                margin=std::max(8,width/2-(title.size()>1?18:10));
             }
-            text(item->hDC,title,margin,0,width-25,height,size,(item->itemState&ODS_DISABLED)?RGB(76,91,112):primary?bg:(active||card||id>=400)?violet:ink,FW_SEMIBOLD);
+            text(item->hDC,title,margin,0,width-margin-6,height,size,(item->itemState&ODS_DISABLED)?RGB(76,91,112):primary?bg:(active||binding)?violet:ink,FW_SEMIBOLD);
             if(item->itemState&ODS_FOCUS) { auto area=item->rcItem; InflateRect(&area,-px(4),-px(4)); DrawFocusRect(item->hDC,&area); }
+            if(direct) BitBlt(original->hDC,0,0,item->rcItem.right,item->rcItem.bottom,surface.dc,0,0,SRCCOPY);
             return TRUE;
         }
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: {
             PAINTSTRUCT ps{}; HDC dc=BeginPaint(hwnd,&ps); RECT r{}; GetClientRect(hwnd,&r);
             if(r.right>0&&r.bottom>0) {
-                HDC buffer=CreateCompatibleDC(dc); auto bitmap=CreateCompatibleBitmap(dc,r.right,r.bottom); auto old=SelectObject(buffer,bitmap);
-                paint(buffer); BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY); SelectObject(buffer,old); DeleteObject(bitmap); DeleteDC(buffer);
+                main_surface.resize(dc,r.right,r.bottom);
+                HDC buffer=main_surface.dc; const int saved=SaveDC(buffer);
+                IntersectClipRect(buffer,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right,ps.rcPaint.bottom);
+                const RECT orbit_area{r.right-px(253),px(167),r.right-px(62),px(352)};
+                RECT intersection{}; IntersectRect(&intersection,&orbit_area,&ps.rcPaint);
+                if(page==0&&EqualRect(&intersection,&ps.rcPaint)) {
+                    auto brush=CreateSolidBrush(RGB(23,27,45)); FillRect(buffer,&orbit_area,brush); DeleteObject(brush);
+                    orbit(buffer,logical(r.right)-158,259,settings.animations?(GetTickCount64()-started)/2200.0:0.6);
+                } else paint(buffer);
+                RestoreDC(buffer,saved);
+                BitBlt(dc,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top,
+                    buffer,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);
             }
             EndPaint(hwnd,&ps); return 0;
         }
         case WM_DESTROY:
+            KillTimer(hwnd,1); main_surface.clear();
             for(int i=1;i<=3;++i) UnregisterHotKey(hwnd,i);
             if(scan_process) CloseHandle(scan_process);
             clear_fonts(); PostQuitMessage(0); return 0;
@@ -449,6 +676,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
 }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR arguments,int show) {
+    ui_test_mode=std::wstring(arguments)==L"--ui-test";
     HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     HANDLE single_instance=CreateMutexW(nullptr,FALSE,L"Local\\CrimeSQLRecovery.SingleInstance");
     if(single_instance&&GetLastError()==ERROR_ALREADY_EXISTS) {
@@ -461,7 +689,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR arguments,int show) {
     POINT origin{}; scale=monitor_scale(GetDpiForSystem(),MonitorFromPoint(origin,MONITOR_DEFAULTTOPRIMARY));
     WNDCLASSW type{}; type.hInstance=instance; type.lpfnWndProc=procedure; type.lpszClassName=L"CrimeSQLRecovery";
     type.hCursor=LoadCursorW(nullptr,IDC_ARROW); type.hIcon=LoadIconW(nullptr,IDI_SHIELD); RegisterClassW(&type);
-    auto hwnd=CreateWindowExW(0,type.lpszClassName,L"CrimeSQL dev system recovery",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,px(1240),px(860),nullptr,nullptr,instance,nullptr);
+    auto hwnd=CreateWindowExW(WS_EX_COMPOSITED,type.lpszClassName,L"CrimeSQL dev system recovery",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,px(1240),px(860),nullptr,nullptr,instance,nullptr);
     if(!hwnd) { Gdiplus::GdiplusShutdown(token); if(single_instance) CloseHandle(single_instance); if(SUCCEEDED(com)) CoUninitialize(); return 1; }
     nh::apply_window_theme(hwnd);
     ShowWindow(hwnd,std::wstring(arguments)==L"--background"?SW_SHOWMINIMIZED:show);

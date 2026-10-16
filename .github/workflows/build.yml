@@ -16,6 +16,9 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Read-only Windows tool checks
+        shell: pwsh
+        run: ./tests/windows_readonly_smoke.ps1
       - name: Package portable application
         shell: pwsh
         run: |
@@ -24,6 +27,7 @@ jobs:
           Copy-Item build/Release/CrimeSQLObserver.exe package/
           Copy-Item README.md package/
           Copy-Item -Recurse docs package/
+          Copy-Item build/windows-readonly-smoke.json package/docs/
           Compress-Archive -Path package/* -DestinationPath release/CrimeSQL-dev-system-recovery-Windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:

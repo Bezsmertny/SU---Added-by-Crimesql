@@ -3,8 +3,8 @@
 1 RT_MANIFEST "app.manifest"
 #endif
 1 VERSIONINFO
- FILEVERSION 0,2,0,0
- PRODUCTVERSION 0,2,0,0
+ FILEVERSION 0,3,0,0
+ PRODUCTVERSION 0,3,0,0
  FILETYPE VFT_APP
 BEGIN
  BLOCK "StringFileInfo"
@@ -13,7 +13,7 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "CrimeSQL dev system recovery\0"
    VALUE "ProductName", "CrimeSQL dev system recovery\0"
-   VALUE "FileVersion", "0.2.0\0"
+   VALUE "FileVersion", "0.3.0\0"
   END
  END
  BLOCK "VarFileInfo"
