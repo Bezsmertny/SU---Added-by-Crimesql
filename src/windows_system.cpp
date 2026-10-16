@@ -39,7 +39,7 @@ Observation read_policy(const Policy& policy) {
 std::wstring backup_directory() {
     PWSTR path = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path))) return {};
-    std::wstring result = std::wstring(path) + L"\\NEDOHACKERS lite\\Backups";
+    std::wstring result = std::wstring(path) + L"\\CrimeSQL dev system recovery\\Backups";
     CoTaskMemFree(path);
     return result;
 }

@@ -20,14 +20,15 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path package, release -Force | Out-Null
-          Copy-Item build/Release/NedohackersLite.exe package/
+          Copy-Item build/Release/CrimeSQLRecovery.exe package/
+          Copy-Item build/Release/CrimeSQLObserver.exe package/
           Copy-Item README.md package/
           Copy-Item -Recurse docs package/
-          Compress-Archive -Path package/* -DestinationPath release/NEDOHACKERS-lite-Windows-x64.zip
+          Compress-Archive -Path package/* -DestinationPath release/CrimeSQL-dev-system-recovery-Windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: NEDOHACKERS-lite-Windows-x64
-          path: release/NEDOHACKERS-lite-Windows-x64.zip
+          name: CrimeSQL-dev-system-recovery-Windows-x64
+          path: release/CrimeSQL-dev-system-recovery-Windows-x64.zip
           if-no-files-found: error
   core-tests:
     runs-on: ubuntu-latest
@@ -46,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: NEDOHACKERS-lite-Windows-x64
+          name: CrimeSQL-dev-system-recovery-Windows-x64
           path: release
       - name: Publish downloadable release
         env:
@@ -55,7 +56,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: >-
           gh release create "$RELEASE_TAG"
-          release/NEDOHACKERS-lite-Windows-x64.zip
+          release/CrimeSQL-dev-system-recovery-Windows-x64.zip
           --verify-tag
-          --title "NEDOHACKERS lite $RELEASE_TAG"
+          --title "CrimeSQL dev system recovery $RELEASE_TAG"
           --notes-file docs/release-notes.md
