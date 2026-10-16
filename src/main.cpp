@@ -463,6 +463,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR arguments,int show) {
     type.hCursor=LoadCursorW(nullptr,IDC_ARROW); type.hIcon=LoadIconW(nullptr,IDI_SHIELD); RegisterClassW(&type);
     auto hwnd=CreateWindowExW(0,type.lpszClassName,L"CrimeSQL dev system recovery",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,px(1240),px(860),nullptr,nullptr,instance,nullptr);
     if(!hwnd) { Gdiplus::GdiplusShutdown(token); if(single_instance) CloseHandle(single_instance); if(SUCCEEDED(com)) CoUninitialize(); return 1; }
+    nh::apply_window_theme(hwnd);
     ShowWindow(hwnd,std::wstring(arguments)==L"--background"?SW_SHOWMINIMIZED:show);
     MSG message{}; int code=0;
     while((code=GetMessageW(&message,nullptr,0,0))>0) if(!IsDialogMessageW(hwnd,&message)) { TranslateMessage(&message); DispatchMessageW(&message); }

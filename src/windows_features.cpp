@@ -2,6 +2,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <bcrypt.h>
+#include <dwmapi.h>
 #include <algorithm>
 #include <cwchar>
 #include <iomanip>
@@ -209,5 +210,12 @@ std::wstring binding_name(Binding b) {
     if (b.key >= VK_F1 && b.key <= VK_F24) out += L"F" + std::to_wstring(b.key - VK_F1 + 1);
     else out += static_cast<wchar_t>(b.key);
     return out;
+}
+void apply_window_theme(HWND window) {
+    BOOL dark=TRUE;
+    if(FAILED(DwmSetWindowAttribute(window,20,&dark,sizeof(dark))))
+        DwmSetWindowAttribute(window,19,&dark,sizeof(dark));
+    const DWORD rounded=2;
+    DwmSetWindowAttribute(window,33,&rounded,sizeof(rounded));
 }
 }

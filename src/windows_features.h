@@ -24,4 +24,5 @@ struct LabResult { bool success; std::wstring message; std::wstring hash; };
 LabResult launch_sandbox(HWND owner, const std::wstring& sample);
 bool write_unicode_file(const std::wstring& path, const std::wstring& contents, bool exclusive = false);
 std::wstring binding_name(Binding binding);
+void apply_window_theme(HWND window);
 }

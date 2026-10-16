@@ -122,6 +122,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     HWND window = CreateWindowW(type.lpszClassName, L"CrimeSQL dev system recovery — Sandbox file timeline", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 1160, 760, nullptr, nullptr, instance, nullptr);
     if (!window) { watcher.stop(); DeleteObject(background); if (SUCCEEDED(com)) CoUninitialize(); return 1; }
+    nh::apply_window_theme(window);
     ShowWindow(window, show); MSG message{}; int code = 0;
     while ((code = GetMessageW(&message, nullptr, 0, 0)) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     if (SUCCEEDED(com)) CoUninitialize();
