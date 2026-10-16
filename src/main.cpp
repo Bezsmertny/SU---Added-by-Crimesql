@@ -1,5 +1,6 @@
 #include "windows_features.h"
 #include "mini_games.h"
+#include "font_recovery.h"
 #include <objbase.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -203,8 +204,8 @@ void layout() {
         place(mouse_id,x,573,(c-14)/2,48); place(keyboard_id,x+(c+14)/2,573,(c-14)/2,48);
     } else if(page==2) place(lab_id,x+24,518,310,48);
     else if(page==3) {
-        for(int i=0;i<4;++i) place(tool_tab_base+i,x+i*((c+12)/4),163,(c-36)/4,36);
-        for(int i=0;i<4;++i) place(action_base+tool_category*4+i,x+c-158,232+i*108,136,40);
+        for(int i=0;i<nh::recovery_category_count;++i) place(tool_tab_base+i,x+i*((c+12)/nh::recovery_category_count),163,(c-48)/nh::recovery_category_count,36);
+        for(int i=0;i<nh::recovery_category_size(tool_category);++i) place(action_base+tool_category*4+i,x+c-158,232+i*108,136,40);
     } else if(page==4) {
         place(autorun_id,x+c-170,181,145,38); place(priority_id,x+c-170,275,145,38); place(animate_id,x+c-170,369,145,38);
         SetWindowTextW(controls.at(autorun_id),nh::autorun_enabled()?L"Отключить":L"Включить");
@@ -287,7 +288,7 @@ void task_manager() {
     else log(L"Windows передан запрос открытия диспетчера задач.");
 }
 void copy_log() {
-    std::wstring s=L"CrimeSQL dev system recovery 0.3.0\r\n";
+    std::wstring s=L"CrimeSQL dev system recovery 0.3.1\r\n";
     for(auto& entry:journal) s+=entry+L"\r\n";
     HGLOBAL memory=GlobalAlloc(GMEM_MOVEABLE,(s.size()+1)*sizeof(wchar_t)); if(!memory) return;
     void* pointer=GlobalLock(memory); if(!pointer) { GlobalFree(memory); return; }
@@ -309,10 +310,10 @@ void command(int id) {
         if(selected_game==4&&simon.showing()) simon_started=GetTickCount64();
         layout(); refresh_board(); return;
     }
-    if(id>=tool_tab_base&&id<tool_tab_base+4) { tool_category=id-tool_tab_base; layout(); return; }
-    if(id>=action_base&&id<action_base+16) {
+    if(id>=tool_tab_base&&id<tool_tab_base+nh::recovery_category_count) { tool_category=id-tool_tab_base; layout(); return; }
+    if(id>=action_base&&id<action_base+nh::recovery_action_count) {
         const auto action=static_cast<nh::RecoveryAction>(id-action_base); const auto& info=nh::action_info(action);
-        const bool maintenance=!nh::recovery_script(action,L"C:\\Windows\\System32").empty();
+        const bool maintenance=!nh::recovery_script(action,L"C:\\Windows\\System32").empty()||action==nh::RecoveryAction::restore_fonts;
         if(maintenance&&scan_process) { result({false,L"Другое окно операции ещё открыто. Закройте его после просмотра результата."}); return; }
         if(info.confirmation[0]&&MessageBoxW(window,info.confirmation,info.title,MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING)!=IDYES) return;
         result(nh::launch_recovery_action(window,action,scan_process)); schedule_timer(); return;
@@ -402,7 +403,7 @@ void paint(HDC dc) {
     RECT sr{0,0,px(236),r.bottom}; brush=CreateSolidBrush(side); FillRect(dc,&sr,brush); DeleteObject(brush);
     shape(dc,22,28,48,48,RGB(38,33,66),RGB(60,48,96)); text(dc,L"C/",32,32,42,39,25,violet,FW_BOLD);
     text(dc,L"CrimeSQL",82,27,145,31,23,ink,FW_BOLD); text(dc,L"DEV / SYSTEM RECOVERY",83,60,140,18,9,muted,FW_SEMIBOLD);
-    shape(dc,22,108,192,31,RGB(20,39,38),RGB(35,65,58),18); text(dc,L"●  LOCAL-FIRST / v0.3.0",36,110,173,26,10,teal,FW_SEMIBOLD);
+    shape(dc,22,108,192,31,RGB(20,39,38),RGB(35,65,58),18); text(dc,L"●  LOCAL-FIRST / v0.3.1",36,110,173,26,10,teal,FW_SEMIBOLD);
     text(dc,L"РАБОЧЕЕ ПРОСТРАНСТВО",24,150,190,20,10,muted,FW_SEMIBOLD);
     shape(dc,18,181+static_cast<int>(nav_position*48),200,42,RGB(42,35,67),RGB(66,53,102),14);
     shape(dc,18,height-172,200,100,panel); text(dc,L"АВАРИЙНЫЙ ВХОД",32,height-160,170,19,10,muted,FW_BOLD);
@@ -454,16 +455,22 @@ void paint(HDC dc) {
         text(dc,L"Журнал — внутри Sandbox; при закрытии он удаляется. Это события всей среды, включая фоновые процессы. Они не доказывают, что конкретный EXE создал каждый файл.",x,610,c,68,13,muted,FW_NORMAL,true);
         text(dc,L"Нужны Windows Pro / Enterprise / Education, виртуализация и компонент Sandbox. На Home лаборатория недоступна.",x,696,c,48,12,amber,FW_NORMAL,true);
     } else if(page==3) {
-        for(int i=0;i<4;++i) {
+        for(int i=0;i<nh::recovery_category_size(tool_category);++i) {
             const auto& info=nh::action_info(static_cast<nh::RecoveryAction>(tool_category*4+i));
             shape(dc,x,216+i*108,c,92,panel);
             text(dc,info.title,x+20,228+i*108,c-210,29,17,ink,FW_SEMIBOLD);
             text(dc,info.description,x+20,265+i*108,c-210,31,12,muted,FW_NORMAL,true);
         }
-        text(dc,scan_process?L"Окно операции открыто. Результат показан в нём; журнал — в Reports.":
+        if(tool_category==4) {
+            text(dc,L"КАК ЭТО РАБОТАЕТ",x+20,466,c-40,26,12,teal,FW_BOLD);
+            text(dc,L"Сначала — копия .reg в Backups. Затем сброс подмен Segoe UI и восстановление шрифтов интерфейса. Для применения выйди из учётной записи и войди снова.",x+20,505,c-40,66,14,muted,FW_NORMAL,true);
+            text(dc,L"Если файлы шрифтов удалены или повреждены: Инструменты → Система → проверка SFC, затем SFC/DISM. Файлы из сети не скачиваются; прочие установленные шрифты сохраняются.",x+20,592,c-40,66,13,amber,FW_NORMAL,true);
+        }
+        text(dc,scan_process?L"Окно операции открыто. Результат и путь к копии или отчёту показаны в нём.":
             tool_category==0?L"Проверки выполняет Microsoft Defender. Автономная проверка перезагружает компьютер после подтверждения.":
             tool_category==1?L"SFC/DISM исправляют повреждения Windows. Обнаружением и удалением угроз занимается антивирус.":
             tool_category==2?L"PowerShell открывается в текущей Windows. В WinRE штатно есть CMD; PowerShell обычно не установлен.":
+            tool_category==4?L"Без автоматической перезагрузки или выхода. Восстановление настроек не проверяет целостность файлов шрифтов.":
             L"Отчёты могут содержать личные пути и команды автозапуска. Проверь их перед отправкой.",x,679,c,53,12,muted,FW_NORMAL,true);
     } else if(page==4) {
         const wchar_t* names[]{L"Запускать вместе с Windows",L"Приоритет приложения",L"Плавные анимации"};
@@ -527,9 +534,9 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             button(reaction_id,L"Начать тест реакции");
             const wchar_t* games[]{L"Пары",L"Реакция",L"Крестики-нолики",L"Пятнашки",L"Саймон",L"Lights Out"};
             for(int i=0;i<6;++i) button(game_tab_base+i,games[i]);
-            const wchar_t* categories[]{L"Защита",L"Система",L"Консоли / WinRE",L"Отчёты"};
-            for(int i=0;i<4;++i) button(tool_tab_base+i,categories[i]);
-            for(int i=0;i<16;++i) button(action_base+i,nh::recovery_script(static_cast<nh::RecoveryAction>(i),L"C:\\Windows\\System32").empty()?L"Открыть  →":L"Запустить  →");
+            const wchar_t* categories[]{L"Защита",L"Система",L"Консоли / WinRE",L"Отчёты",L"Шрифты"};
+            for(int i=0;i<nh::recovery_category_count;++i) button(tool_tab_base+i,categories[i]);
+            for(int i=0;i<nh::recovery_action_count;++i) button(action_base+i,i==static_cast<int>(nh::RecoveryAction::restore_fonts)?L"Восстановить":nh::recovery_script(static_cast<nh::RecoveryAction>(i),L"C:\\Windows\\System32").empty()?L"Открыть  →":L"Запустить  →");
             for(auto& entry:controls) SetWindowSubclass(entry.second,button_proc,1,static_cast<DWORD_PTR>(entry.first));
             for(int i=0;i<3;++i) { key_fields[static_cast<std::size_t>(i)]=button(400+i,L"Нажмите сочетание"); SetWindowSubclass(key_fields[static_cast<std::size_t>(i)],button_proc,1,400+i); }
             set_key_fields(); if(!register_keys(settings.bindings)) log(L"Некоторые горячие клавиши заняты. Измените их в Настройках.");
@@ -537,7 +544,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             BOOL animation=TRUE; if(SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animation,0)&&!animation) settings.animations=false;
             machine=nh::system_summary(); game.reset(static_cast<unsigned>(GetTickCount64()));
             puzzle.reset(static_cast<unsigned>(started)); lights.reset(static_cast<unsigned>(started)); simon.reset(static_cast<unsigned>(started));
-            log(L"CrimeSQL 0.3.0 запущен. Восстановление без команды пользователя не выполняется.");
+            log(L"CrimeSQL 0.3.1 запущен. Восстановление без команды пользователя не выполняется.");
             layout(); return 0;
         }
         case WM_TIMER: {
@@ -565,7 +572,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
                 DWORD code=STILL_ACTIVE;
                 if(GetExitCodeProcess(scan_process,&code)&&code!=STILL_ACTIVE) {
                     CloseHandle(scan_process); scan_process=nullptr;
-                    log(L"Процесс окна операции завершился с кодом "+std::to_wstring(code)+L". Это не оценка отсутствия угроз. Смотрите вывод команды и Reports.");
+                    log(L"Процесс окна операции завершился с кодом "+std::to_wstring(code)+L". Это не оценка отсутствия угроз. Результат и путь к копии/отчёту показаны в окне операции.");
                 }
             }
             schedule_timer(); return 0;
@@ -597,11 +604,11 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             if(direct) { surface.resize(item->hDC,item->rcItem.right,item->rcItem.bottom); item->hDC=surface.dc; }
             bool nav=id>=nav_base&&id<nav_base+7;
             bool active=(nav&&id-nav_base==page)||(id>=game_tab_base&&id<game_tab_base+6&&id-game_tab_base==selected_game)||
-                (id>=tool_tab_base&&id<tool_tab_base+4&&id-tool_tab_base==tool_category);
+                (id>=tool_tab_base&&id<tool_tab_base+nh::recovery_category_count&&id-tool_tab_base==tool_category);
             bool primary=id==scan_id||id==lab_id||id==bind_id;
             bool card=id>=game_base&&id<game_base+25;
             bool binding=id>=400&&id<403;
-            bool inside_panel=card||(page==1&&id>=fix_base&&id<fix_base+4)||(page==2&&id==lab_id)||(page==3&&id>=action_base&&id<action_base+16)||page==4;
+            bool inside_panel=card||(page==1&&id>=fix_base&&id<fix_base+4)||(page==2&&id==lab_id)||(page==3&&id>=action_base&&id<action_base+nh::recovery_action_count)||page==4;
             COLORREF behind=nav?side:(page==0&&id==scan_id)?RGB(23,27,45):inside_panel?panel:bg;
             auto brush=CreateSolidBrush(behind); FillRect(item->hDC,&item->rcItem,brush); DeleteObject(brush);
             COLORREF fill=primary?teal:active?RGB(42,35,67):hovered[id]?RGB(36,43,61):binding?RGB(27,34,51):nav?side:panel;
@@ -676,6 +683,14 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
 }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR arguments,int show) {
+    const std::wstring command_line=arguments;
+    if(command_line.rfind(L"--restore-fonts ",0)==0) {
+        const auto com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+        const auto restored=nh::restore_system_fonts(command_line.substr(16));
+        MessageBoxW(nullptr,restored.message.c_str(),L"CrimeSQL — восстановление шрифтов",MB_OK|(restored.success?MB_ICONINFORMATION:MB_ICONWARNING));
+        if(SUCCEEDED(com)) CoUninitialize();
+        return restored.success?0:1;
+    }
     ui_test_mode=std::wstring(arguments)==L"--ui-test";
     HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     HANDLE single_instance=CreateMutexW(nullptr,FALSE,L"Local\\CrimeSQLRecovery.SingleInstance");

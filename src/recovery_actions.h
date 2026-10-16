@@ -6,8 +6,12 @@ enum class RecoveryAction {
     defender_ui,defender_quick,defender_full,defender_offline,
     sfc_verify,sfc_repair,dism_restore,restore_points,
     powershell_admin,cmd_admin,winre_info,advanced_startup,
-    startup_audit,startup_settings,system_info,diagnostic_report
+    startup_audit,startup_settings,system_info,diagnostic_report,
+    restore_fonts,font_settings
 };
+constexpr int recovery_action_count = 18;
+constexpr int recovery_category_count = 5;
+constexpr int recovery_category_size(int category) { return category == 4 ? 2 : 4; }
 struct ActionInfo {
     const wchar_t* title;
     const wchar_t* description;

@@ -29,6 +29,13 @@ BOOL CALLBACK find_window(HWND window,LPARAM parameter) {
     if(process==search.process&&std::wstring(type)==L"CrimeSQLRecovery") search.window=window;
     return TRUE;
 }
+BOOL CALLBACK find_dialog(HWND window,LPARAM parameter) {
+    auto& search=*reinterpret_cast<Search*>(parameter); DWORD process=0;
+    GetWindowThreadProcessId(window,&process);
+    wchar_t type[128]{}; GetClassNameW(window,type,128);
+    if(process==search.process&&std::wstring(type)==L"#32770"&&IsWindowVisible(window)) search.window=window;
+    return TRUE;
+}
 void send(HWND window,UINT message,WPARAM w=0,LPARAM l=0) {
     DWORD_PTR result=0;
     check(SendMessageTimeoutW(window,message,w,l,SMTO_ABORTIFHUNG,5000,&result)!=0,"UI message completed without hanging");
@@ -79,7 +86,21 @@ int wmain(int argc,wchar_t** argv) {
                 send(app.window,WM_COMMAND,500+game); inspect_children(app.window);
                 if(game!=1) send(app.window,WM_COMMAND,300);
             }
-            if(page==3) for(int category=0;category<4;++category) { send(app.window,WM_COMMAND,600+category); inspect_children(app.window); }
+            if(page==3) for(int category=0;category<5;++category) {
+                send(app.window,WM_COMMAND,600+category); inspect_children(app.window);
+                if(category==4) {
+                    check(PostMessageW(app.window,WM_COMMAND,716,0)!=FALSE,"Request font-recovery confirmation only");
+                    Search dialog{app.process.dwProcessId,nullptr};
+                    for(int i=0;i<100&&!dialog.window;++i) { EnumWindows(find_dialog,reinterpret_cast<LPARAM>(&dialog)); if(!dialog.window) Sleep(20); }
+                    check(dialog.window!=nullptr,"Font recovery opens confirmation before any repair");
+                    const auto no=GetDlgItem(dialog.window,IDNO);
+                    check(no&&(GetWindowLongPtrW(no,GWL_STYLE)&BS_TYPEMASK)==BS_DEFPUSHBUTTON,"Font-recovery confirmation defaults to No");
+                    send(dialog.window,WM_COMMAND,IDNO,reinterpret_cast<LPARAM>(GetDlgItem(dialog.window,IDNO)));
+                    send(app.window,WM_NULL);
+                    check(IsWindowEnabled(app.window)!=FALSE,"Declining font repair returns to the application");
+                    inspect_children(app.window);
+                }
+            }
         }
         const DWORD baseline=GetGuiResources(app.process.hProcess,GR_GDIOBJECTS);
         for(int pass=0;pass<12;++pass) for(int page=0;page<7;++page) {

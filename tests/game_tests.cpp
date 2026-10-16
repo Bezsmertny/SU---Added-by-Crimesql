@@ -68,7 +68,9 @@ int main(int argc,char** argv) {
         check(nh::recovery_script(A::dism_restore,L"C:\\Windows\\System32").find(L"/Online /Cleanup-Image /RestoreHealth")!=std::wstring::npos,"DISM repair command");
         check(nh::recovery_script(A::winre_info,L"C:\\Windows\\System32").find(L"/info")!=std::wstring::npos,"WinRE info does not alter boot configuration");
         check(nh::recovery_script(A::defender_offline,L"C:\\Windows\\System32").find(L"Start-MpWDOScan")!=std::wstring::npos,"Use built-in Defender offline scan");
-        for(int i=0;i<16;++i) {
+        check(nh::action_info(A::restore_fonts).confirmation[0],"Font recovery requires explicit confirmation");
+        check(nh::recovery_category_count==5&&nh::recovery_category_size(4)==2,"Font tools have their own category without empty actions");
+        for(int i=0;i<nh::recovery_action_count;++i) {
             auto action=static_cast<A>(i); const auto& info=nh::action_info(action);
             check(info.title[0]&&info.description[0],"Each recovery tool has an explanation");
             if(!nh::recovery_script(action,L"C:\\Windows\\System32").empty()) check(info.confirmation[0],"Maintenance operation requires confirmation");
@@ -77,7 +79,7 @@ int main(int argc,char** argv) {
         }
         if(argc==3&&std::string(argv[1])=="--export-scripts") {
             const auto directory=std::filesystem::path(argv[2]); std::filesystem::create_directories(directory);
-            for(int i=0;i<16;++i) {
+            for(int i=0;i<nh::recovery_action_count;++i) {
                 const auto script=nh::recovery_script(static_cast<A>(i),L"C:\\Windows\\System32");
                 if(script.empty()) continue;
                 const auto body=nh::maintenance_wrapper(script,L"C:\\Reports\\O'Brien\\Отчёты\\test.txt");

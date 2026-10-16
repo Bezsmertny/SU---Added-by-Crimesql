@@ -1,4 +1,5 @@
 #include "windows_features.h"
+#include "font_recovery.h"
 #include <shlobj.h>
 #include <shellapi.h>
 #include <bcrypt.h>
@@ -257,6 +258,12 @@ Result launch_recovery_action(HWND owner,RecoveryAction action,HANDLE& process) 
     if(action==RecoveryAction::defender_ui) executable=L"windowsdefender:";
     else if(action==RecoveryAction::advanced_startup) executable=L"ms-settings:recovery";
     else if(action==RecoveryAction::startup_settings) executable=L"ms-settings:startupapps";
+    else if(action==RecoveryAction::font_settings) executable=L"ms-settings:fonts";
+    else if(action==RecoveryAction::restore_fonts) {
+        const auto sid=current_user_sid();
+        if(sid.empty()) return {false,L"Не удалось определить пользователя; шрифты не изменены."};
+        executable=executable_path(); arguments=L"--restore-fonts "+sid; verb=L"runas";
+    }
     else if(action==RecoveryAction::system_info) executable=system_file(L"msinfo32.exe");
     else if(action==RecoveryAction::restore_points) executable=system_file(L"rstrui.exe");
     else if(action==RecoveryAction::powershell_admin) {
@@ -288,10 +295,12 @@ Result launch_recovery_action(HWND owner,RecoveryAction action,HANDLE& process) 
         arguments=L"-NoLogo -NoProfile -Command \""+body+L"\""; verb=L"runas";
     } else return {false,L"Неизвестная операция."};
     SHELLEXECUTEINFOW launch{}; launch.cbSize=sizeof(launch); launch.hwnd=owner;
-    launch.fMask=SEE_MASK_FLAG_NO_UI|(script.empty()?0:SEE_MASK_NOCLOSEPROCESS);
+    const bool tracked=!script.empty()||action==RecoveryAction::restore_fonts;
+    launch.fMask=SEE_MASK_FLAG_NO_UI|(tracked?SEE_MASK_NOCLOSEPROCESS:0);
     launch.lpVerb=verb.c_str(); launch.lpFile=executable.c_str(); launch.lpParameters=arguments.empty()?nullptr:arguments.c_str(); launch.nShow=SW_SHOWNORMAL;
     if(!ShellExecuteExW(&launch)) return {false,L"Операция не запущена: "+error_text(GetLastError())};
-    if(!script.empty()) process=launch.hProcess;
+    if(tracked) process=launch.hProcess;
+    if(action==RecoveryAction::restore_fonts) return {true,L"Открыто отдельное окно восстановления шрифтов. Результат и путь к копии Backups будут показаны в нём. Для применения потребуется повторный вход в Windows."};
     return {true,script.empty()?L"Запрос открытия инструмента передан Windows.":
         L"Окно операции открыто. Результат и код завершения показаны в нём; журнал сохраняется в Reports. Это не подтверждение отсутствия угроз."};
 }
